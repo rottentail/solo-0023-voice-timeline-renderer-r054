@@ -65,7 +65,10 @@ the service does not consume any remote credential.
 The source ID is chosen by the caller and must be 3-64 characters using
 letters, digits, underscore, or hyphen. Repeating the same ID with exactly the
 same name and bytes is idempotent. Reusing it with different content returns
-the `source_conflict` error.
+the `source_conflict` error; content is compared by SHA-256 digest, so
+recordings that merely share a name, duration, or signal measurements are not
+mistaken for replays. The same recording may be registered under any number of
+distinct IDs, and each registration keeps its own copy of the exact bytes.
 
 Response:
 
@@ -193,10 +196,13 @@ Each check creates an isolated temporary data directory, starts the real HTTP
 handler, sends generated WAV inputs, and verifies read-back or rendered output.
 The checks are bounded and do not require network access.
 
-## Deferred test boundary
+## Tests
 
-This baseline contains no unit tests, test fixtures, browser checks, or
-`test_command`. The downstream task stage owns test creation and red/green
-verification. It should extend coverage around WAV chunk edge cases, timeline
-crossfade bounds, failed job cleanup, concurrent idempotency, and HTTP error
-mapping.
+```bash
+go test ./...
+```
+
+The suite covers source identity binding (distinct recordings that share name,
+duration, format, and signal measurements), idempotent replay versus conflict,
+on-disk integrity checks, receipt-to-media digest binding, per-span placement of
+same-named recordings, and byte-identical rendering across a restart.

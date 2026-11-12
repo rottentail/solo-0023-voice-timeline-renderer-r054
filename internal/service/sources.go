@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
-	"math"
 	"strings"
 	"time"
 
@@ -38,26 +37,12 @@ func (s *Service) CreateSource(ctx context.Context, id string, request SourceWri
 
 	existing, getErr := s.repo.GetSourceMeta(id)
 	if getErr == nil {
+		// A source identifier binds exactly one immutable payload. Only an
+		// identical digest (hence identical bytes) plus the same name may be
+		// treated as a replay of the original registration. Format length or
+		// signal similarity is never sufficient: distinct recordings can share
+		// every measurement and still carry different samples.
 		if existing.Digest != digest || existing.Name != request.Name {
-			if existing.Name == request.Name && existing.ByteCount == int64(len(payload)) {
-				clip, info, decodeErr := audiocodec.DecodeWAV(payload)
-				if decodeErr == nil {
-					measured := audiocodec.Measure(clip.Samples)
-					formatMatches := info.SampleRate == existing.SampleRate &&
-						info.Channels == existing.Channels &&
-						info.BitsPerSample == existing.BitsPerSample &&
-						info.FrameCount == existing.FrameCount
-					peakMatches := math.Abs(measured.PeakDBFS-existing.PeakDBFS) < 0.000001
-					rmsMatches := math.Abs(measured.RMSDBFS-existing.RMSDBFS) < 0.000001
-					if formatMatches && peakMatches && rmsMatches {
-						stored, _, loadErr := s.repo.GetSource(id)
-						if loadErr != nil {
-							return domain.SourceAsset{}, false, loadErr
-						}
-						return stored, false, nil
-					}
-				}
-			}
 			return domain.SourceAsset{}, false, domain.E(domain.KindConflict, "source_conflict", "source_id", "identifier is already bound to different source content")
 		}
 		return existing, false, nil

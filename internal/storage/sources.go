@@ -28,38 +28,16 @@ func (repo *Repository) SaveSource(asset domain.SourceAsset, wav []byte) error {
 		_ = os.RemoveAll(temp)
 	}()
 	mediaPath := filepath.Join(temp, "source.wav")
-	linked := false
-	entries, scanErr := os.ReadDir(repo.path("sources"))
-	if scanErr != nil {
-		return domain.Wrap(domain.KindInternal, "storage_error", "", "cannot inspect reusable media", scanErr)
+	// The supplied payload is always persisted verbatim. Sharing media from a
+	// peer source based on metadata (name, byte count, format, frame count) is
+	// unsafe because distinct recordings routinely share those attributes; a
+	// source directory must own the exact bytes that were registered under it.
+	if err := writeBytes(mediaPath, wav, 0o640); err != nil {
+		return domain.Wrap(domain.KindInternal, "storage_error", "", "cannot write source media", err)
 	}
-	for _, entry := range entries {
-		if !entry.IsDir() || entry.Name() == asset.ID {
-			continue
-		}
-		var peer domain.SourceAsset
-		peerRoot := repo.path("sources", entry.Name())
-		if readJSON(filepath.Join(peerRoot, "metadata.json"), &peer) != nil {
-			continue
-		}
-		if peer.Name != asset.Name || peer.ByteCount != asset.ByteCount ||
-			peer.SampleRate != asset.SampleRate || peer.Channels != asset.Channels ||
-			peer.BitsPerSample != asset.BitsPerSample || peer.FrameCount != asset.FrameCount {
-			continue
-		}
-		if err := os.Link(filepath.Join(peerRoot, "source.wav"), mediaPath); err != nil {
-			continue
-		}
-		asset.Digest = peer.Digest
-		asset.PeakDBFS = peer.PeakDBFS
-		asset.RMSDBFS = peer.RMSDBFS
-		linked = true
-		break
-	}
-	if !linked {
-		if err := writeBytes(mediaPath, wav, 0o640); err != nil {
-			return domain.Wrap(domain.KindInternal, "storage_error", "", "cannot write source media", err)
-		}
+	stored := sha256.Sum256(wav)
+	if hex.EncodeToString(stored[:]) != asset.Digest {
+		return domain.E(domain.KindInternal, "source_integrity_error", "source_id", "metadata digest does not describe the supplied media")
 	}
 	if _, err := os.Stat(mediaPath); err != nil {
 		return domain.Wrap(domain.KindInternal, "storage_error", "", "cannot write source media", err)

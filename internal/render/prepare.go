@@ -2,8 +2,9 @@ package render
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
-	"fmt"
 	"sync"
 
 	"voice-timeline-renderer/internal/audiocodec"
@@ -21,10 +22,11 @@ var sourceClipPool = struct {
 	order []string
 }{clips: make(map[string]*audiocodec.Clip)}
 
-func loadSourceClip(source SourceInput) (*audiocodec.Clip, error) {
-	key := fmt.Sprintf("%s/%d/%d/%d/%d", source.Asset.Name,
-		source.Asset.SampleRate, source.Asset.Channels,
-		source.Asset.BitsPerSample, source.Asset.FrameCount)
+// loadSourceClip caches decoded clips by content digest. An asset's digest
+// commits to the exact media bytes, so equal digests imply equal samples;
+// metadata such as name, frame count, or format is shared by many distinct
+// recordings and must never be used to identify a clip.
+func loadSourceClip(key string, wav []byte) (*audiocodec.Clip, error) {
 	sourceClipPool.Lock()
 	if cached, ok := sourceClipPool.clips[key]; ok {
 		result := &audiocodec.Clip{
@@ -36,7 +38,7 @@ func loadSourceClip(source SourceInput) (*audiocodec.Clip, error) {
 		return result, nil
 	}
 	sourceClipPool.Unlock()
-	clip, _, err := audiocodec.DecodeWAV(source.WAV)
+	clip, _, err := audiocodec.DecodeWAV(wav)
 	if err != nil {
 		return nil, err
 	}
@@ -78,7 +80,11 @@ func prepareSpans(
 	plan domain.Timeline,
 	sources map[string]SourceInput,
 ) ([]preparedSpan, int64, error) {
-	decoded := make(map[string]*audiocodec.Clip, len(sources))
+	type resolvedSource struct {
+		clip   *audiocodec.Clip
+		digest string
+	}
+	decoded := make(map[string]resolvedSource, len(sources))
 	prepared := make([]preparedSpan, 0, len(plan.Spans))
 	cursor := int64(0)
 	for index, span := range plan.Spans {
@@ -86,15 +92,31 @@ func prepareSpans(
 		if !ok {
 			return nil, 0, errors.New("timeline references a missing source")
 		}
-		clip, ok := decoded[span.SourceID]
+		resolved, ok := decoded[span.SourceID]
 		if !ok {
-			parsed, err := loadSourceClip(source)
+			// Bind the receipt to the bytes that are actually mixed. A recorded
+			// digest is a commitment to the stored media; if it contradicts the
+			// supplied bytes the source is corrupt and must not be rendered under
+			// the claimed identity. An absent digest (older records) is accepted
+			// and the receipt uses the measured digest instead.
+			actual := sha256.Sum256(source.WAV)
+			actualDigest := hex.EncodeToString(actual[:])
+			if source.Asset.Digest != "" && actualDigest != source.Asset.Digest {
+				return nil, 0, domain.E(
+					domain.KindInternal,
+					"source_integrity_error",
+					"source_id",
+					"stored source media does not match its registered digest",
+				)
+			}
+			parsed, err := loadSourceClip(actualDigest, source.WAV)
 			if err != nil {
 				return nil, 0, err
 			}
-			clip = parsed
-			decoded[span.SourceID] = parsed
+			resolved = resolvedSource{clip: parsed, digest: actualDigest}
+			decoded[span.SourceID] = resolved
 		}
+		clip := resolved.clip
 		selected, err := audiocodec.SliceFrames(ctx, clip, span.SourceStartFrame, span.SourceEndFrame)
 		if err != nil {
 			return nil, 0, err
@@ -125,7 +147,7 @@ func prepareSpans(
 		prepared = append(prepared, preparedSpan{
 			Index:            index,
 			SourceID:         span.SourceID,
-			SourceDigest:     source.Asset.Digest,
+			SourceDigest:     resolved.digest,
 			SourceStartFrame: span.SourceStartFrame,
 			SourceEndFrame:   span.SourceEndFrame,
 			OutputStartFrame: start,
